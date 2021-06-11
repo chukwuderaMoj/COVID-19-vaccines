@@ -1,0 +1,213 @@
+---
+title: 'Lab 2'
+author: "Kayla W., Dera C., Pavan E., Greg T."
+output: pdf_document
+toc: true
+---
+```{r load packages, echo=FALSE, warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2) 
+library(tidyverse)
+library(haven)
+library(patchwork)
+library(kableExtra)
+theme_set(theme_minimal())
+install.packages('rstatix')
+library(rstatix)
+library(wooldridge)
+library(car)
+library(lmtest)
+library(sandwich)
+library(stargazer)
+install.packages("data.table")
+library("data.table")
+library(zoo)
+install.packages('psych')
+library(psych)
+library(gridExtra)
+install.packages("lubridate")
+library(lubridate)
+```
+# Pull data from [OWID Vaccination Github](https://github.com/owid/covid-19-data/tree/master/public/data/vaccinations)
+```{r}
+us_state_vaccinations <- fread("https://github.com/owid/covid-19-data/raw/master/public/data/vaccinations/us_state_vaccinations.csv")
+head(arrange(us_state_vaccinations,desc(date)), n = 70)
+```
+# Pull in State Abbreviations
+```{r}
+states_abb <- tibble(state = state.name) %>%
+   bind_cols(tibble(abb = state.abb)) %>% 
+   bind_rows(tibble(state = "District of Columbia", abb = "DC"))
+states_abb
+
+?tibble()
+```
+## Prepare vaccination data
+```{r}
+# Convert date strings to dates. 
+us_state_vaccinations[,date:=as.Date(date)]
+
+# Select relevant Vacc. variables. 
+vacc <- us_state_vaccinations %>%
+  dplyr::select(date, location, people_vaccinated_per_hundred, people_fully_vaccinated_per_hundred) %>% rename(state = location) 
+
+# Add state abbreviation
+vacc <- left_join(vacc, states_abb, by = "state")
+
+# Remove rows from locations that are not from 50 states + DC
+vacc <- vacc[!is.na(vacc$abb), ]
+
+# Create an effective date (14 days after vacc. date) to use for comparison with COVID cases
+vacc <- vacc %>% 
+  mutate(effective_date = date + 14) %>%
+  rename(vacc_date = date) %>% 
+  relocate(effective_date, vacc_date) %>% 
+  filter(effective_date <= today()-1)
+
+head(arrange(vacc,effective_date), n = 70)
+```
+# Vaccination data summary stats
+```{r}
+# review prepared dataset
+describe(vacc)
+summary(vacc)
+```
+## Pull data from cdc API [United States COVID-19 Cases and Deaths by State over Time](https://data.cdc.gov/Case-Surveillance/United-States-COVID-19-Cases-and-Deaths-by-State-o/9mfq-cb36) 
+```{r}
+# Load the package required to read JSON files.
+library("rjson")
+
+#install.packages("jsonlite")
+library("jsonlite")
+US_COVID_19_Cases_and_Deaths_by_State_over_Time <- jsonlite::fromJSON("https://data.cdc.gov/resource/9mfq-cb36.json?$limit=50000")
+
+# Convert JSON file to a data frame.
+cdc_covid_raw <- as.data.frame(US_COVID_19_Cases_and_Deaths_by_State_over_Time)
+cdc_covid_raw %>% 
+  arrange(state) %>% 
+  group_by(state) %>% 
+  arrange(desc(submission_date)) %>% 
+  head(n=70)
+```
+# Prepare CDC data
+```{r}
+cdc_covid <- cdc_covid_raw
+
+# Convert date strings to dates
+cdc_covid$submission_date <- as.Date(cdc_covid$submission_date)
+
+# Select relevant covid variables. 
+cdc_covid <- cdc_covid %>%
+  dplyr::select(submission_date, state, new_case, new_death)
+
+# Change date column name
+cdc_covid <- rename(cdc_covid, effective_date = submission_date, abb = state)
+
+# Add state abbreviation
+cdc_covid <- left_join(cdc_covid, states_abb, by = "abb")
+
+# Remove rows from locations that are not from 50 states + DC
+cdc_covid <- cdc_covid[!is.na(cdc_covid$state), ]
+
+# Filter data to be only after first Vaccination effective date 01/26/2021
+cdc_covid <- cdc_covid %>% filter(effective_date >= "2021-01-26")
+
+# convert new_case and new_death to integers
+cdc_covid$new_case <- as.numeric(as.character(cdc_covid$new_case))
+cdc_covid$new_death <- as.numeric(as.character(cdc_covid$new_death))
+```
+# cdc_covid data summary stats
+```{r}
+# review prepared dataset
+describe(cdc_covid)
+summary(cdc_covid)
+```
+# Check how many rows have negative new_case or negative new_death
+```{r}
+head(arrange(cdc_covid, new_case), n = 20)
+head(arrange(cdc_covid, new_death), n = 40)
+```
+# Mutate the negative new cases and negative new deaths to 0
+```{r}
+cdc_covid <- cdc_covid %>% mutate(new_case = replace(new_case, which(new_case<0), 0))
+cdc_covid <- cdc_covid %>% mutate(new_death = replace(new_death, which(new_death<0), 0))
+
+# Check that there are no more new cases or new deaths below 0
+head(arrange(cdc_covid, new_case), n = 20)
+head(arrange(cdc_covid, new_death), n = 40)
+```
+## Merge Vacc data with CDC COVID data
+```{r}
+vacc_cdccovid <- vacc %>% right_join(cdc_covid, by=c("effective_date","state"))
+
+vacc_cdccovid <- vacc_cdccovid[, c("state", "vacc_date", "effective_date", "people_vaccinated_per_hundred", "people_fully_vaccinated_per_hundred", "new_case", "new_death")]
+
+vacc_cdccovid %>%  arrange(desc(effective_date))
+```
+# Check summary stats on merged dataset
+```{r}
+describe(vacc_cdccovid)
+summary(vacc_cdccovid)
+```
+# Time series of % pop vaccinated over time
+```{r}
+plot_vacc_1 <- vacc_cdccovid %>%  
+  ggplot(aes(x = vacc_date, y = people_vaccinated_per_hundred)) + 
+  geom_line(aes(color = state))  +
+  labs(title = "Vaccionations are rising!", x = "Vaccination dates", y = "People Vaccinated per hundred") + 
+  theme(plot.title = element_text(size=10))
+
+plot_vacc_1
+```
+# Time series of % pop vaccinated over time by Effective Date
+```{r}
+plot_vacc_2 <- vacc_cdccovid %>%  
+  ggplot(aes(x = effective_date, y = people_vaccinated_per_hundred)) + 
+  geom_line(aes(color = state))  +
+  labs(title = "Vaccionations are rising!", x = "Effective dates", y = "People Vaccinated per hundred") + 
+  theme(plot.title = element_text(size=10))
+
+plot_vacc_2
+```
+```{r}
+vacc_cdccovid %>% filter(effective_date == "2021-01-02")
+```
+
+
+```{r}
+plot_vacc_3 <- vacc_cdccovid %>%  
+  ggplot(aes(x=people_vaccinated_per_hundred)) +
+  geom_histogram(data=subset(vacc_cdccovid,effective_date == "2021-02-05"),fill = "red", alpha = 0.2) +
+  geom_histogram(data=subset(vacc_cdccovid,effective_date == "2021-03-05"),fill = "blue", alpha = 0.2) +
+  geom_histogram(data=subset(vacc_cdccovid,effective_date == "2021-04-05"),fill = "green", alpha = 0.2) +
+  labs(title = "Histograms of People Vacc per hundred on effective dates: 2/05 (red), 3/05 (blue), 4/05 (green)", x = "People Vaccinated per hundred", y = "Counts") + 
+  theme(plot.title = element_text(size=10))
+
+plot_vacc_3
+```
+# Create cumulative sum of new cases and new deaths
+```{r}
+#install.packages("slider")
+library(slider)
+vacc_cdccovid <- vacc_cdccovid %>% 
+  group_by(state) %>% 
+  mutate(cumuluative_new_case_7 = slide_dbl(new_case, sum, .before = 6, .complete = TRUE)) %>% mutate(cumuluative_new_death_7 = slide_dbl(new_death, sum, .before = 6, .complete = TRUE))
+
+# rearrange columns to have cumulative sum after daily count for new cases and new deaths
+vacc_cdccovid <- vacc_cdccovid[, c("state", "vacc_date", "effective_date", "people_vaccinated_per_hundred", "people_fully_vaccinated_per_hundred", "new_case", "cumuluative_new_case_7", "new_death", "cumuluative_new_death_7")]
+
+vacc_cdccovid
+```
+# add column of state population and then mutat new cases and new deaths to new_cases_per_100,000 and new_deaths_per_100,000
+
+# [Census burea data](https://walker-data.com/tidycensus/articles/other-datasets.html)
+
+# Change Plot below to have y axis be cumulative_new_case_7_per_100,000
+```{r}
+plot_1 <- vacc_cdccovid %>%  
+  ggplot(aes(x = people_vaccinated_per_hundred, y = cumuluative_new_case_7)) + 
+  geom_point()
+plot_1
+```
+
+

@@ -1,0 +1,76 @@
+---
+title: "Covid_Mobility_Data_Prep"
+author: "KWopschall"
+date: "4/7/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Datasource for mobility data comes from: 
+
+- [COVID-19 Community Mobility Report](https://www.google.com/covid19/mobility/) A Google dataset that includes state-level measurements of individual mobility
+
+This rmd documents the ingestion, clean up, and transformation of the raw dataset to make it usable for our modeling.
+
+```{r}
+## Load data
+library(readr)
+data <- read_csv("2021_US_Region_Mobility_Report.csv")
+View(data)
+```
+
+```{r}
+## Remove county level data and US level data... filter down to rows that are only tied to state level
+
+#Removing county level data
+datasub <- data[is.na(data$sub_region_2),]
+
+#Removing US level data
+df <- subset(datasub, sub_region_1 > 0)
+View(df)
+```
+
+Values presented here are data based on day by location in relationship to the "Baseline". Baseline is the median value for hte corresponding day of the week during the five week period of Jan3-Feb6, 2020.
+
+To make this data useable, we are going to reduce this down to creating the following metrics:
+
+1. Movement Change (categorical)
+-increasing
+-decreasing
+-no change
+
+2. Average Change From Baseline (continuous)
+-average of all of the baseline figures by state
+
+3. Movement variation (continuous)
+-standard deviation of movement change
+
+4. Jan-Feb Change(Categorical)
+- Decrease
+- Increase
+- No Change
+
+5. Feb-March change (categorical)
+-Decrease
+-Increase
+-No Change
+
+6. Changing trend (categorical)
+- concatinating 4 & 5 from above
+```{r}
+temp2 <- aggregate(list(retail = df$retail_and_recreation_percent_change_from_baseline), list(format(df$date, "%Y-%m"), df$sub_region_1, mean)
+```
+
+
+```{r}
+
+#Create table that has monthly data for October, Nov, December
+
+temp2 <- aggregate(list(retail = df$retail_and_recreation_percent_change_from_baseline), list(format(df$date, "%Y-%m"), df$sub_region_1, mean)
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

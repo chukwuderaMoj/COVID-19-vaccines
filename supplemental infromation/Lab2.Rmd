@@ -1,0 +1,941 @@
+---
+title: 'Lab 2'
+author: "Kayla W., Dera C., Pavan E., Greg T."
+output: pdf_document
+toc: true
+---
+```{r load packages, echo=FALSE, warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2) 
+library(tidyverse)
+library(haven)
+library(patchwork)
+library(kableExtra)
+theme_set(theme_minimal())
+install.packages('rstatix')
+library(rstatix)
+library(wooldridge)
+library(car)
+library(lmtest)
+library(sandwich)
+library(stargazer)
+install.packages("data.table")
+library("data.table")
+library(zoo)
+install.packages('psych')
+library(psych)
+library(gridExtra)
+install.packages("lubridate")
+library(lubridate)
+library(tidycensus)
+options(tigris_use_cache = TRUE)
+census_api_key("cb13cdf9ca61c5de3ec6914bd54e0a647d352563")
+install.packages("choroplethr")
+install.packages("choroplethrMaps")
+library(choroplethr)
+library(choroplethrMaps)
+library(gridExtra)
+library(psych)
+```
+# Pull data from [OWID Vaccination Github](https://github.com/owid/covid-19-data/tree/master/public/data/vaccinations)
+```{r}
+us_state_vaccinations <- fread("https://github.com/owid/covid-19-data/raw/master/public/data/vaccinations/us_state_vaccinations.csv")
+head(arrange(us_state_vaccinations,desc(date)), n = 70)
+```
+# Pull in State Abbreviations
+```{r}
+states_df <- tibble(state = state.name) %>%
+   bind_cols(tibble(abb = state.abb)) %>% 
+   bind_rows(tibble(state = "District of Columbia", abb = "DC"))
+states_df
+```
+
+## Prepare vaccination data
+```{r}
+# Convert date strings to dates. 
+us_state_vaccinations[,date:=as.Date(date)]
+
+# Select relevant Vacc. variables. 
+vacc <- us_state_vaccinations %>%
+  dplyr::select(date, location, people_vaccinated_per_hundred, people_fully_vaccinated_per_hundred) %>% rename(state = location) 
+
+# Replace New York State to just New York in dataset
+vacc <- vacc %>%
+  mutate(state = replace(state, state== "New York State" , "New York"))
+
+# Add state abbreviation
+vacc <- left_join(vacc, states_df, by = "state")
+
+# Remove rows from locations that are not from 50 states + DC
+vacc <- vacc[!is.na(vacc$abb), ]
+
+vacc %>% 
+  arrange(desc(date)) %>% 
+  head(n=51)
+```
+# Sanity check data with [CDC Vacc tracker](https://covid.cdc.gov/covid-data-tracker/#vaccinations)
+According to CDC daily tracker, April 11, 2021 the states with HIGHEST "Total Doses Administered per 100k by State" are NM, NH, CT - Our data aligns with CDC although metric is slightly different.
+```{r}
+# Sanity check State with most % Vacc in Daily CDC tracker
+vacc %>% 
+  filter(date == "2021-04-11") %>% 
+  arrange(desc(people_vaccinated_per_hundred)) %>% 
+  dplyr::select(state, people_vaccinated_per_hundred) %>% 
+  head(n = 5)
+```
+According to CDC daily tracker, April 11, 2021 the states with LOWEST "Total Doses Administered per 100k by State" are AL, GA, MI - Our data aligns with CDC although metric is slightly different.
+```{r}
+# Sanity check State with least  % Vacc in Daily CDC tracker
+vacc %>% 
+  filter(date == "2021-04-11") %>% 
+  arrange(people_vaccinated_per_hundred) %>% 
+  dplyr::select(state, people_vaccinated_per_hundred) %>% 
+  head(n = 5)
+```
+# Time series of % pop vaccinated over time (up to yesterday)
+```{r}
+plot_vacc_0 <- vacc %>%  
+  ggplot(aes(x = date, y = people_vaccinated_per_hundred)) + 
+  geom_line(aes(color = state))  +
+  theme(legend.position = 'none', plot.margin = margin(0.1, 2.6, 0.1, 0.1, "cm")) + 
+  labs(title = "Vaccionations are rising!", x = "Vaccination dates", y = "People Vaccinated per hundred") + 
+  theme(plot.title = element_text(size=10), legend.position = "none")
+
+plot_vacc_0 + geom_hline(yintercept=35.9, linetype='dotted', col = 'red') +
+  annotate("text", x = as.Date("2021-03-01"), y = 35.9, label = "US national level 04/11/2021", vjust = -0.5, size=3)
+```
+# Check distribution of % Population Vaccinated over Feb, March, April
+```{r}
+plot_vacc_distribution_over_time <- vacc %>%  
+  ggplot(aes(x=people_vaccinated_per_hundred)) +
+  geom_histogram(data=subset(vacc, date == "2021-02-11"),fill = "red", alpha = 0.2) +
+  geom_histogram(data=subset(vacc, date == "2021-03-11"),fill = "blue", alpha = 0.2) +
+  geom_histogram(data=subset(vacc, date == "2021-04-11"),fill = "green", alpha = 0.2) +
+  labs(title = "% Vaccinated distribution appears more normal over time",
+         subtitle = "People Vacc per hundred on dates: Feb 11 (red), March 11 (blue), April 11 (green)", x = "People Vaccinated per hundred", y = "Counts") + 
+  theme(plot.title = element_text(size=14, color="black")) +
+  theme(plot.subtitle=element_text(size=10, face="italic", color="black")) +
+  theme(axis.text.x=element_text(size=10, color="black")) 
+
+plot_vacc_distribution_over_time + annotate("text", x = 10, y = 26, label = "Distribution 2/11/211", vjust = -0.5, size=3, color = "red", alpha = 0.5) + annotate("text", x = 21, y = 11, label = "Distribution 4/11/21 11, 2021", vjust = -0.5, size=3, color = "blue", alpha = 0.5) + annotate("text", x = 36, y = 10, label = "Distribution 4/11/21", vjust = -0.5, size=3, color = "green", alpha = 0.7)
+```
+
+
+# Create an effective date (14 days after vacc. date) to use for comparison with COVID cases
+```{r}
+vacc <- vacc %>% 
+  mutate(effective_date = date + 14) %>%
+  rename(vacc_date = date) %>% 
+  relocate(effective_date, vacc_date) %>% 
+  filter(effective_date <= today()) 
+
+head(vacc[with(vacc, order(-effective_date)),], n=70)
+```
+# Vaccination data summary stats
+```{r}
+# review prepared dataset
+describe(vacc)
+summary(vacc)
+```
+
+## Pull data from cdc API [United States COVID-19 Cases and Deaths by State over Time](https://data.cdc.gov/Case-Surveillance/United-States-COVID-19-Cases-and-Deaths-by-State-o/9mfq-cb36) 
+```{r}
+# Load the package required to read JSON files.
+library("rjson")
+
+#install.packages("jsonlite")
+library("jsonlite")
+US_COVID_19_Cases_and_Deaths_by_State_over_Time <- jsonlite::fromJSON("https://data.cdc.gov/resource/9mfq-cb36.json?$limit=50000")
+
+# Convert JSON file to a data frame.
+cdc_covid_raw <- as.data.frame(US_COVID_19_Cases_and_Deaths_by_State_over_Time)
+cdc_covid_raw %>% 
+  arrange(state) %>% 
+  group_by(state) %>% 
+  arrange(desc(submission_date)) %>% 
+  head(n=70)
+```
+# Prepare CDC data
+```{r}
+cdc_covid <- cdc_covid_raw
+
+# Convert date strings to dates
+cdc_covid$submission_date <- as.Date(cdc_covid$submission_date)
+
+# Select relevant covid variables. 
+cdc_covid <- cdc_covid %>%
+  dplyr::select(submission_date, state, new_case, new_death)
+
+# Change date column name
+cdc_covid <- rename(cdc_covid, effective_date = submission_date, abb = state)
+
+# Add state abbreviation
+cdc_covid <- left_join(cdc_covid, states_df, by = "abb")
+
+# Remove rows from locations that are not from 50 states + DC
+cdc_covid <- cdc_covid[!is.na(cdc_covid$state), ]
+
+# Filter data to be only after first Vaccination effective date 01/26/2021
+cdc_covid <- cdc_covid %>% filter(effective_date >= "2021-01-26")
+
+# convert new_case and new_death to integers
+cdc_covid$new_case <- as.numeric(as.character(cdc_covid$new_case))
+cdc_covid$new_death <- as.numeric(as.character(cdc_covid$new_death))
+
+# Check March 31 data
+#cdc_covid %>% filter(effective_date == "2021-03-31") %>% arrange(state)
+```
+# cdc_covid data summary stats
+```{r}
+# review prepared dataset
+describe(cdc_covid)
+summary(cdc_covid)
+```
+# Check how many rows have negative new_case or negative new_death
+```{r}
+head(arrange(cdc_covid, new_case), n = 20)
+head(arrange(cdc_covid, new_death), n = 40)
+```
+## Merge Vacc data with CDC COVID data
+```{r}
+vacc_cdccovid <- vacc %>% right_join(cdc_covid, by=c("effective_date","state"))
+
+vacc_cdccovid <- vacc_cdccovid[, c("state", "abb.y", "vacc_date", "effective_date", "people_vaccinated_per_hundred", "people_fully_vaccinated_per_hundred", "new_case", "new_death")] %>% rename(abb = abb.y)
+
+vacc_cdccovid %>%  arrange(desc(effective_date)) 
+# Check March 31 data
+#vacc_cdccovid %>% filter(effective_date == "2021-03-31") %>% arrange(state)
+```
+# Check summary stats on merged dataset
+```{r}
+describe(vacc_cdccovid)
+summary(vacc_cdccovid)
+```
+# Time series of % pop vaccinated over time
+```{r}
+plot_vacc_1 <- vacc_cdccovid %>%  
+  ggplot(aes(x = vacc_date, y = people_vaccinated_per_hundred)) + 
+  geom_line(aes(color = abb))  +
+  labs(title = "Vaccionations are rising!", x = "Vaccination dates", y = "People Vaccinated per hundred") + 
+  theme(plot.title = element_text(size=10))
+
+plot_vacc_1
+```
+# Time series of % pop vaccinated over time by Effective Date
+```{r}
+plot_vacc_2 <- vacc_cdccovid %>%
+  ggplot(aes(x = effective_date, y = people_vaccinated_per_hundred)) + 
+  geom_line(aes(color = abb))  +
+  labs(title = "Vaccionations are rising!", x = "Effective dates", y = "People Vaccinated per hundred") + 
+  theme(plot.title = element_text(size=10))
+
+plot_vacc_2
+```
+# Check distribution of % Population Vaccinated over Feb, March, April
+```{r}
+plot_vacc_3a <- vacc_cdccovid %>%  
+  ggplot(aes(x=people_vaccinated_per_hundred)) +
+  geom_histogram(data=subset(vacc_cdccovid,effective_date == "2021-02-10"),fill = "red", alpha = 0.2) +
+  geom_histogram(data=subset(vacc_cdccovid,effective_date == "2021-03-10"),fill = "blue", alpha = 0.2) +
+  geom_histogram(data=subset(vacc_cdccovid,effective_date == "2021-04-10"),fill = "green", alpha = 0.2) +
+  labs(title = "% Vaccinated distribution appears more normal over time",
+         subtitle = "People Vacc per hundred on effective dates: Feb 10 (red), March 10 (blue), April 10 (green)", x = "People Vaccinated per hundred", y = "Counts") + 
+  theme(plot.title = element_text(size=14, color="black")) +
+  theme(plot.subtitle=element_text(size=10, face="italic", color="black")) +
+  theme(axis.text.x=element_text(size=10, color="black")) 
+
+plot_vacc_3a
+```
+# Percentage of People Vaccinated by State as of Effective Date 03/17/2021
+```{r fig.width=6, fig.height=10}
+theme_set(theme_bw())
+plot_vacc_by_state <- vacc_cdccovid %>% filter(effective_date == "2021-03-31") %>%
+ggplot(aes(x=reorder(abb,people_vaccinated_per_hundred), y=people_vaccinated_per_hundred,label=people_vaccinated_per_hundred)) +
+  geom_bar(stat ='identity', width=.5)  +
+  labs(title = "% Vaccinated ranged ranges from 15 - 30% on March 17, 2021", 
+       subtitle= "Percentage of People Vaccinated by State as of 03/17/2021", x = "States", y = "People Vaccinated per hundred") + 
+  theme(plot.title = element_text(size=14, color="black")) +
+  theme(plot.subtitle=element_text(size=10, face="italic", color="black")) +
+  theme(axis.text.x=element_text(size=10, color="black")) +
+  coord_flip()
+
+plot_vacc_by_state
+```
+# Create cumulative sum of new cases and new deaths
+```{r}
+#install.packages("slider")
+library(slider)
+vacc_cdccovid <- vacc_cdccovid %>% 
+  group_by(state) %>% 
+  mutate(cumuluative_new_case_7 = slide_dbl(new_case, sum, .before = 6, .complete = TRUE)) %>% mutate(cumuluative_new_death_7 = slide_dbl(new_death, sum, .before = 6, .complete = TRUE))
+
+# rearrange columns to have cumulative sum after daily count for new cases and new deaths
+vacc_cdccovid <- vacc_cdccovid[, c("state", "vacc_date", "effective_date", "people_vaccinated_per_hundred", "people_fully_vaccinated_per_hundred", "new_case", "cumuluative_new_case_7", "new_death", "cumuluative_new_death_7")]
+```
+# [Census burea data](https://walker-data.com/tidycensus/articles/other-datasets.html)
+Used (https://www.census.gov/data/academy/courses/choroplethr.html) instead as tidycensus API key is not working.
+
+# Add state population to main dataset
+```{r}
+# pull in state population
+data(df_pop_state)
+
+# renane columns
+df_pop_state <- rename(df_pop_state , state = region, population = value)
+library(stringr)
+
+# cleaning up columns to prepare for merge with vacc_cdccovid data
+df_pop_state <- df_pop_state %>% 
+  mutate(state_cap = str_to_title(state)) %>% 
+  select(state_cap, population) %>% 
+  rename(state = state_cap) %>% 
+  mutate(state = replace(state, state== "District Of Columbia" , "District of Columbia"))
+
+
+# merge with state_df
+vacc_cdccovid_pop <- vacc_cdccovid %>% right_join(df_pop_state, by=c("state"))
+
+head(arrange(vacc_cdccovid_pop, desc(effective_date)), n = 51)
+```
+# Mutate new_cases and new_deaths to be per 100,000
+```{r}
+vacc_cdccovid_pop <- vacc_cdccovid_pop %>% 
+  mutate(cumuluative_new_case_7_per100000 = cumuluative_new_case_7/population*100000) %>%
+    mutate(cumuluative_new_death_7_per100000 = cumuluative_new_death_7/population*100000)
+
+head(arrange(vacc_cdccovid_pop, desc(effective_date)), n = 51)
+```
+```{r}
+# Select final variables 
+vacc_covid_final <- vacc_cdccovid_pop %>%
+  dplyr::select(state, vacc_date, effective_date, people_vaccinated_per_hundred, people_fully_vaccinated_per_hundred, cumuluative_new_case_7_per100000, cumuluative_new_death_7_per100000)
+
+head(arrange(vacc_covid_final, desc(effective_date)), n = 51)
+```
+
+# Sanity check data with [CDC Case tracker](https://covid.cdc.gov/covid-data-tracker/#cases_casesper100klast7days)
+- According to CDC daily tracker, April 11, 2021 the states with HIGHEST "Cumulative Cases per 100k in Last 7 Days" was Michigan with 515.8 followed by NJ with 300.7
+- Our data aligns with CDC 
+```{r}
+# Sanity check State with most new cases with Daily CDC tracker
+vacc_covid_final %>% 
+  filter(effective_date == "2021-04-10") %>% 
+  arrange(desc(cumuluative_new_case_7_per100000)) %>% 
+  dplyr::select(state, effective_date, cumuluative_new_case_7_per100000) %>% 
+  head(n = 5)
+```
+- According to CDC daily tracker, April 11, 2021 the states with LOWEST "Cumulative Cases per 100k in Last 7 Days" Arkansas with 35.9 followed by Alabama with 40.2
+- Our data aligns with CDC 
+```{r}
+# Sanity check State with fewest new cases with Daily CDC tracker
+vacc_covid_final %>% 
+  filter(effective_date == "2021-04-10") %>% 
+  arrange(cumuluative_new_case_7_per100000) %>% 
+  dplyr::select(state, effective_date, cumuluative_new_case_7_per100000) %>% 
+  head(n = 5)
+```
+
+# Read Movement data
+```{r}
+Movement_data_agg_raw <- read.csv(file = "../Movement_Data_Aggregated_UPDATED.csv")
+Movement_data_agg_raw
+
+Movement_month_comp_raw <- read.csv(file = "../Movement_Month_Comp_UPDATED.csv")
+Movement_month_comp_raw
+```
+# Prepare data for merge
+```{r}
+# Change column name from sub_region_1 to state
+Movement_data_agg <- Movement_data_agg_raw %>%
+  rename(state = sub_region_1)
+head(Movement_data_agg)
+
+Movement_month_comp <- Movement_month_comp_raw %>%
+  rename(state = sub_region_1)
+head(Movement_month_comp)
+```
+# Merge Movement datasets with vacc_covid_final data
+```{r}
+vacc_covid_movement <- vacc_covid_final %>% 
+  right_join(Movement_data_agg, by=c("state")) %>% 
+  right_join(Movement_month_comp, by=c("state"))
+
+head(arrange(vacc_covid_movement, desc(effective_date)), n = 51)
+```
+# Read Policy Mandate data
+```{r}
+Policy_Mandate_raw <- read.csv(file = "../Policy_Mandate_Data_UPDATED.csv")
+Policy_Mandate_raw
+```
+# Merge Policy Mandate datasets with vacc_covid_final data
+```{r}
+vacc_covid_movement_policy <- vacc_covid_movement %>% right_join(Policy_Mandate_raw, by="state")
+head(arrange(vacc_covid_movement_policy, desc(effective_date)), n = 51)
+```
+# read state density data from [World Population Review](https://worldpopulationreview.com/state-rankings/state-densities)
+```{r}
+State_raw <- read.csv(file = "../csvData.csv")
+State_raw
+```
+# Select density and add Distric of Colombia density from [World Population Review - Washington DC](https://worldpopulationreview.com/us-cities/washington-dc-population)
+```{r}
+# Select density 
+State_density <- State_raw %>%
+  dplyr::select(State, Density) %>% 
+  rename(state = State) %>% 
+  dplyr::add_row(state = "District of Columbia", Density = 11682) %>% 
+  arrange(state)
+
+State_density
+```
+# Add State density to vacc_covid_movement_policy
+```{r}
+vacc_covid_movement_policy_den <- vacc_covid_movement_policy %>% right_join(State_density, by="state")
+head(arrange(vacc_covid_movement_policy_den, desc(effective_date)), n = 51)
+```
+
+# Filter for effective date on March 31, 2021
+```{r}
+vacc_covid_final_03_31 <- vacc_covid_movement_policy_den %>% filter(effective_date == "2021-03-31")
+vacc_covid_final_03_31 
+# Write csv file
+write.csv(vacc_covid_final_03_31,"../vacc_covid_final_03_31.csv", row.names = FALSE)
+```
+# Check transformations in distribution of variables: % vaccinated and New cases
+```{r}
+plot_Vacc <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=people_vaccinated_per_hundred)) +
+  geom_histogram() +
+  labs(title = "Distribution of % Vaccionated is somewhate normal", x = "% Population Vaccinated", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_Vacc_Log <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=log(people_vaccinated_per_hundred))) +
+  geom_histogram() +
+  labs(title = "Distribution of log of % Vaccionated is \nalso somewhate normal,no difference", x = "Log of % Population Vaccinated", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_New_Cases <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=cumuluative_new_case_7_per100000)) +
+  geom_histogram() +
+  labs(title = "Distribution of New Cases per 100K is \nsomewhat normal", x = "7 Day Sum of New Cases per 100K", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_New_Cases_log <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=log(cumuluative_new_case_7_per100000))) +
+  geom_histogram() +
+  labs(title = "Distribution of log of New Cases per 100K is \nmore normal", x = "Log of 7 Day Sum of New Cases per 100K", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+grid.arrange(plot_Vacc, plot_Vacc_Log,plot_New_Cases,plot_New_Cases_log, nrow = 2, ncol = 2)
+```
+# Check scatter plot of both variables
+```{r} 
+plot_3 <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x =  people_vaccinated_per_hundred, y = cumuluative_new_case_7_per100000)) + 
+  geom_point()  +
+  labs(title = "7 day sum of New cases versus % Population \nVacc. with no transformation", x = "% Population Vaccinated", y = "7 Day Sum of New Cases per 100K") + 
+  theme(plot.title = element_text(size=10), aspect.ratio=1) +
+  geom_smooth()
+
+plot_4 <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x =  people_vaccinated_per_hundred, y = log(cumuluative_new_case_7_per100000))) + 
+  geom_point() +
+  labs(title = "Log transform of 7 day sum of New Cases \nappears to create a more linear relationsip", x = "% Population Vaccinated", y = "Log of 7 Day Sum of New Cases per 100K") + 
+  theme(plot.title = element_text(size=10), aspect.ratio=1) +
+  geom_smooth(method = lm)
+
+plot_3 | plot_4 
+```
+# Base model with no transformations
+```{r} 
+#Build base model
+model_one <- lm(cumuluative_new_case_7_per100000 ~ people_vaccinated_per_hundred, data = vacc_covid_final_03_31)
+
+model_one
+coeftest(model_one, vcov = vcovHC)
+```
+# Base model with Log-Linear transformation
+```{r} 
+model_one_log_linear <- lm(log(cumuluative_new_case_7_per100000) ~ people_vaccinated_per_hundred, data = vacc_covid_final_03_31)
+model_one_log_linear
+coeftest(model_one_log_linear, vcov = vcovHC)
+```
+# Base model with Linear-Log transformation
+```{r}
+model_one_linear_log <- lm(cumuluative_new_case_7_per100000 ~ log(people_vaccinated_per_hundred), data = vacc_covid_final_03_31)
+model_one_linear_log
+coeftest(model_one_linear_log, vcov = vcovHC)
+```
+# Base model with Log-Log transformation
+```{r} 
+model_one_log_log <- lm(log(cumuluative_new_case_7_per100000) ~ log(people_vaccinated_per_hundred), data = vacc_covid_final_03_31)
+model_one_log_log
+coeftest(model_one_log_log, vcov = vcovHC)
+```
+## CLM Assumptions:
+
+Following are the five assumption of the CLM.
+
+  1. IID Sampling 
+  2. Linear Conditional Expectation 
+  3. No Perfect Collinearity
+  4. Homoskedastic Errors 
+  5. Normally Distributed Errors
+
+`IID Sampling:`
+
+
+
+
+`Linear Conditional Expectation:`
+
+To check whether there is a linear conditional expectation, we looked at the predicted values vs. residuals of our model. It appears that the relationship is non-linear with a steep slope at the extreme right, probably caused due to outliers.
+
+```{r echo=TRUE,message=FALSE,warning=FALSE}
+
+vacc_covid_final_03_31['model_preds'] <- predict(model_one_log_linear)
+vacc_covid_final_03_31['model_resids'] <- resid(model_one_log_linear)
+
+
+# df_cond_exp <- vacc_covid_movement_03_31 %>% 
+#   mutate(
+#     model_preds = predict(model_three), 
+#     model_resids = resid(model_three)
+#   ) 
+
+vacc_covid_final_03_31 %>% 
+  ggplot(aes(model_preds, model_resids)) + 
+  geom_point() + 
+  stat_smooth()
+```
+`No Perfect Collinearity:`
+
+In order to check for perfect collinearity, We checked if R has dropped any columns when fitting the model. Because it's the Base model, obviously the column has not been dropped. Will check again with Model_2 for perfect collinearity if any columns have been dropped.
+
+```{r echo=TRUE,message=FALSE,warning=FALSE}
+model_one_log_linear$coefficients
+```
+
+Another test to check for perfect collinearity is to use a VIF command. Again, because our base model only had one column, VIF doesn't work. We will repeat the test with Model_2 when we add more variables.
+
+```{r}
+#vif(model_one_log_linear)
+```
+
+
+`Homoskedastic Errors:`
+
+To assess whether the distribution of the errors is homoskedastic, we examined the residuals versus fitted plot. From the plot it looks like the variance is almost even from left to right with a slightly increased variance on the extreme right but not really severe. Need to check if a log transform can fix the variance.
+
+ 
+```{r}
+plot(model_one_log_linear, which=3)
+```
+
+`Normally Distributed Errors:`
+
+```{r}
+plot_one <- vacc_covid_final_03_31 %>% 
+  ggplot(aes(x = model_resids)) + 
+  geom_histogram()
+  
+plot_two <- vacc_covid_final_03_31 %>% 
+  ggplot(aes(sample = model_resids)) + 
+  stat_qq() + stat_qq_line()
+
+plot_one / plot_two
+```
+The histogram of residuals shows that the distribution is mostly normal with some some deviation from normality, specifically there appears to be long tails on the right. The qq plot confirms the same with the distribution almost being close to normal line but with some deviation towards extreme right. Hopefully a transformation of the variable could resolve this issue. 
+
+## Model 2 & 3
+# EDA of additional data to consider for models with more variables
+# State population density
+```{r}
+plot_Dens <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=Density)) +
+  geom_histogram() +
+  labs(title = "Distribution of Density does not appear normal", x = "Density", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_Dens_log <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=log(Density))) +
+  geom_histogram() +
+  labs(title = "Distribution of Log Density is somewhate normal", x = "Density", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_Dens | plot_Dens_log
+```
+# EDA of Movement data
+# Movement in Retail & Recreation March, 2021
+```{r}
+# Retail and Recreation Movement March only
+plot_RetRec_march <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=retail_and_recreation_percent_change_from_baseline_2021.03)) +
+  geom_histogram() +
+  labs(title = "Distribution of Retail & Rec March is \nsomewhat normal", x = "Retail & Recreation % change \nfrom baseline march", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_RetRec_march_log <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=log(retail_and_recreation_percent_change_from_baseline_2021.03))) +
+  geom_histogram() +
+  labs(title = "Distribution of Log of Retail & Rec March does not \nappear normal.", x = "Retail & Recreation % change \nfrom baseline march", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_RetRec_march | plot_RetRec_march_log
+```
+# Trend in the Movement in Retail & Recreation Jan to March, 2021
+```{r}
+# Retail and Recreation Movement Jan-March trend
+plot_RetRec_trend <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=retail_pattern)) +
+  geom_bar() +
+  labs(title = "Distribution of Retail & Rec Jan to March trend", x = "Retail & Recreation trend - Jan to March", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_RetRec_trend
+```
+# Movement in Transit Stations baseline to March, 2021
+```{r}
+# Retail and Recreation Movement March only
+plot_Transit_march <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=transit_stations_percent_change_from_baseline_2021.03
+)) +
+  geom_histogram() +
+  labs(title = "Distribution of Transit Stations in March is \nsomewhat normal", x = "Transit Stations % change \nfrom baseline march", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_Transit_march_log <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=log(transit_stations_percent_change_from_baseline_2021.03
+))) +
+  geom_histogram() +
+  labs(title = "Distribution of log of Transit Stations in March does \not appear normal", x = "Transit Stations % change \nfrom baseline march", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_Transit_march | plot_Transit_march_log
+```
+# Trend in the Movement in Transit Stations Jan to March, 2021
+```{r}
+# Retail and Recreation Movement Jan-March trend
+plot_Transit_trend <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=transit_pattern)) +
+  geom_bar() +
+  labs(title = "Distribution of Transit Stations Jan to March trend", x = "Transit Stations trend - Jan to March", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_Transit_trend
+```
+# Non-Essential Business Closure policy
+```{r}
+# Non-Essential Business Closure policy
+plot_non_ess_bus <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=Non.Essential.Business.Closures)) +
+  geom_bar() +
+  coord_flip() +
+  labs(title = "Distribution of Non-Essential Business Closure Policy", x = "Non-Essential Business Closure policy", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_non_ess_bus
+```
+# Bar Closure policy
+```{r}
+# Bar Closure policy
+plot_bar_closure <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=Bar.Closures.)) +
+  geom_bar() +
+  coord_flip() +
+  labs(title = "Distribution of Bar Closure Policy", x = "Bar Closure policy", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_bar_closure
+```
+# Face Mask mandate policy
+```{r}
+# Face Mask policy
+plot_facemask_mandate <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=Statewide.Face.Mask.Requirement)) +
+  geom_bar() +
+  coord_flip() +
+  labs(title = "Distribution of Face Mask Mandate Policy", x = "Face Mask Mandate policy", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_facemask_mandate
+```
+# Reopening Status
+```{r}
+# Reopening Status
+plot_reopen <- vacc_covid_final_03_31 %>%  
+  ggplot(aes(x=Status.of.Reopening)) +
+  geom_bar() +
+  coord_flip() +
+  labs(title = "Distribution of Reopening Status", x = "Reopen Status", y = "Count") + 
+  theme(plot.title = element_text(size=10))
+
+plot_reopen
+```
+
+
+
+#Add in dummy variables for the Policy information so its usable in the model:
+
+```{r}
+vacc_covid_final_03_31$Bussiness_Flag <- ifelse(vacc_covid_final_03_31$Non.Essential.Business.Closures == "Some Non-Essential Businesses Open with Limits", 0, ifelse(vacc_covid_final_03_31$Non.Essential.Business.Closures == "All Non-Essential Businesses Open", 2, 1))
+
+vacc_covid_final_03_31$Bar_Flag <- ifelse(vacc_covid_final_03_31$Bar.Closures. == "Closed", 0, ifelse(vacc_covid_final_03_31$Bar.Closures. == "Open", 2, 1))
+
+vacc_covid_final_03_31$Mask_Flag <- ifelse(vacc_covid_final_03_31$Statewide.Face.Mask.Requirement == "Yes", 0, 1)
+
+vacc_covid_final_03_31$Workplace_flag <- ifelse(vacc_covid_final_03_31$workplace_mean == "HIGH", 2, ifelse(vacc_covid_final_03_31$workplace_mean == "LOW", 0, 1))
+
+vacc_covid_final_03_31$Retail_flag <- ifelse(vacc_covid_final_03_31$retail_mean == "HIGH", 2, ifelse(vacc_covid_final_03_31$retail_mean == "LOW", 0, 1))
+
+vacc_covid_final_03_31$Parks_flag <- ifelse(vacc_covid_final_03_31$parks_mean == "HIGH", 2, ifelse(vacc_covid_final_03_31$parks_mean == "LOW", 0, 1))
+
+vacc_covid_final_03_31$Grocery_flag <- ifelse(vacc_covid_final_03_31$grocery_mean == "HIGH", 2, ifelse(vacc_covid_final_03_31$grocery_mean == "LOW", 0, 1))
+
+vacc_covid_final_03_31$Transit_flag <- ifelse(vacc_covid_final_03_31$transit_mean == "HIGH", 2, ifelse(vacc_covid_final_03_31$transit_mean == "LOW", 0, 1))
+
+vacc_covid_final_03_31$Res_flag <- ifelse(vacc_covid_final_03_31$residential_mean == "HIGH", 2, ifelse(vacc_covid_final_03_31$residential_mean == "LOW", 0, 1))
+
+
+#Create a dummy variable for positive and negative movement values:
+vacc_covid_final_03_31$Workplace_pos <- ifelse(vacc_covid_final_03_31$workplaces_percent_change_from_baseline_2021.03 > 0, 1,0)
+
+vacc_covid_final_03_31$Retail_pos <- ifelse(vacc_covid_final_03_31$retail_and_recreation_percent_change_from_baseline_2021.03 > 0, 1, 0)
+
+vacc_covid_final_03_31$Parks_pos <- ifelse(vacc_covid_final_03_31$parks_percent_change_from_baseline_2021.03 > 0, 1, 0)
+
+vacc_covid_final_03_31$Grocery_pos <- ifelse(vacc_covid_final_03_31$grocery_and_pharmacy_percent_change_from_baseline_2021.03 > 0, 1, 0)
+
+vacc_covid_final_03_31$Transit_pos <- ifelse(vacc_covid_final_03_31$transit_stations_percent_change_from_baseline_2021.03 > 0, 1, 0) 
+
+vacc_covid_final_03_31$Res_pos <- ifelse(vacc_covid_final_03_31$residential_percent_change_from_baseline_2021.03> 0, 1, 0) 
+
+```
+
+#Create and run model 2
+
+For model 2 we wanted to focus on movement 
+
+```{r}
+model_two <- lm(log(cumuluative_new_case_7_per100000) ~ people_vaccinated_per_hundred + log(Density) +  Workplace_flag + Retail_flag +Transit_flag, data = vacc_covid_final_03_31)
+model_two
+coeftest(model_two, vcov = vcovHC)
+
+```
+# F-test to compare effectiveness of Model two to Model One log-linear
+The F-test for Model two is statistically significant in this dataset, therefore we can reject the null that Model performs just as well in this dataset. Therefore Model Two appears to be a better performing model in this dataset.
+```{r}
+anova(model_one_log_linear, model_two)
+```
+
+#Complete CLM Checks 
+
+Following are the five assumption of the CLM.
+
+  1. IID Sampling 
+  2. Linear Conditional Expectation 
+  3. No Perfect Collinearity
+  4. Homoskedastic Errors 
+  5. Normally Distributed Errors
+
+`IID Sampling:`
+
+
+
+
+`Linear Conditional Expectation:`
+
+To check whether there is a linear conditional expectation, we looked at the predicted values vs. residuals of our model. It appears that the residuals are fairly evenly distributed around 0.
+
+```{r echo=TRUE,message=FALSE,warning=FALSE}
+
+vacc_covid_final_03_31['model_preds_2'] <- predict(model_two)
+vacc_covid_final_03_31['model_resids_2'] <- resid(model_two)
+
+
+# df_cond_exp <- vacc_covid_movement_03_31 %>% 
+#   mutate(
+#     model_preds = predict(model_three), 
+#     model_resids = resid(model_three)
+#   ) 
+
+vacc_covid_final_03_31 %>% 
+  ggplot(aes(model_preds_2, model_resids_2)) + 
+  geom_point() + 
+  stat_smooth()
+```
+`No Perfect Collinearity:`
+
+To check for Perfect Collinearity among our model variables, we looked at Pearson correlation coefficients and bivariate scatter plots between each of the variables. The correlation coefficients seems to suggest that there is a positive correlation between the flag variables. Each of the flag variables have been independently derived from the actual dataset and so, we don't anticipate there is any perfect collinearity. We will inspect the coefficients and also the output of VIF to further understand the collinearity between the variables.  
+
+```{r}
+
+model_2_vars <- vacc_covid_final_03_31[c('Density','Workplace_flag','Retail_flag','Transit_flag')]
+
+pairs.panels(model_2_vars, 
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB",
+             density = TRUE,  # show density plots
+             ellipses = TRUE # show correlation ellipses
+             )
+```
+
+In order to check for perfect collinearity, We also checked if R has dropped any columns when fitting the model. We see that all of our variables have coefficients that are not equal to zero, suggesting that there is no perfect collinearity. 
+
+```{r echo=TRUE,message=FALSE,warning=FALSE}
+model_two$coefficients
+```
+
+Another test to check for perfect collinearity is to use a VIF command. We see here that while they are all greater than one, there doesn't appear to be any high VIF numbers suggesting we don't have significant collinearity between our variables. 
+
+```{r}
+vif(model_two)
+```
+
+
+`Homoskedastic Errors:`
+
+To assess whether the distribution of the errors is homoskedastic, we examined the residuals versus fitted plot. From the plot it looks like the variance is very evenly distributed above and below. This looks nice and balanced for the most part.
+
+ 
+```{r}
+plot(model_two, which=3)
+```
+
+`Normally Distributed Errors:`
+
+```{r}
+plot_one <- vacc_covid_final_03_31 %>% 
+  ggplot(aes(x = model_resids_2)) + 
+  geom_histogram()
+  
+plot_two <- vacc_covid_final_03_31 %>% 
+  ggplot(aes(sample = model_resids_2)) + 
+  stat_qq() + stat_qq_line()
+
+plot_one / plot_two
+```
+The histogram of residuals shows that the distribution is mostly normal with some some deviation from normality on the lower tail. 
+
+
+#Model 3
+
+For Model 3 we are going to include the policy data we have as well and see how that alters the modeling:
+
+```{r}
+model_three <- lm(log(cumuluative_new_case_7_per100000) ~ people_vaccinated_per_hundred + log(Density) +  Workplace_flag + Retail_flag +Transit_flag + Bussiness_Flag + Bar_Flag + Mask_Flag + Parks_flag + Grocery_flag, data = vacc_covid_final_03_31)
+model_three
+coeftest(model_three, vcov = vcovHC)
+```
+# F-test to compare effectiveness of Model Three to Model Two
+The F-test for Model three is not statistically significant in this dataset, therefore we cannot reject the null that model two performs just as well as Model Three.
+```{r}
+anova(model_two, model_three)
+```
+
+
+#CLM for Model 3
+
+
+`IID Sampling:`
+
+
+
+
+`Linear Conditional Expectation:`
+
+To check whether there is a linear conditional expectation, we looked at the predicted values vs. residuals of our model. This line looks a lot less linear than our model two, where it doesn't trend along zero at any point and rather bounces above and below it.
+
+```{r echo=TRUE,message=FALSE,warning=FALSE}
+
+vacc_covid_final_03_31['model_preds_3'] <- predict(model_three)
+vacc_covid_final_03_31['model_resids_3'] <- resid(model_three)
+
+
+# df_cond_exp <- vacc_covid_movement_03_31 %>% 
+#   mutate(
+#     model_preds = predict(model_three), 
+#     model_resids = resid(model_three)
+#   ) 
+
+vacc_covid_final_03_31 %>% 
+  ggplot(aes(model_preds_3, model_resids_3)) + 
+  geom_point() + 
+  stat_smooth()
+```
+
+`No Perfect Collinearity:`
+
+To check for Perfect Collinearity among our model variables, we looked at Pearson correlation coefficients and bivariate scatter plots between each of the variables. The correlation coefficients seems to suggest that there is a positive correlation between the flag variables as observed in model_2 variable case as well. Each of the flag variables have been independently derived from the actual dataset and so, we don't anticipate there is any perfect collinearity. We will inspect the coefficients and also the output of VIF to further understand the collinearity between the variables.  
+
+
+```{r fig.width=8, fig.height=10}
+
+model_3_vars <- vacc_covid_final_03_31[c('people_vaccinated_per_hundred', 'Density','Workplace_flag','Retail_flag','Transit_flag','Bussiness_Flag','Bar_Flag','Mask_Flag', 'Parks_flag','Grocery_flag')]
+
+pairs.panels(model_3_vars, 
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB",
+             density = TRUE,  # show density plots
+             ellipses = TRUE # show correlation ellipses
+             )
+```
+
+In order to check for perfect collinearity, We checked if R has dropped any columns when fitting the model. We see that all of our variables have coefficients that are not equal to zero, suggesting that there is no perfect collinearity. 
+
+```{r echo=TRUE,message=FALSE,warning=FALSE}
+model_three$coefficients
+```
+
+Another test to check for perfect collinearity is to use a VIF command. We see here that while they are all greater than one, there doesn't appear to be any high VIF numbers suggesting we don't have significant collinearity between our variables. We can note, qualitatively, that there are a few higher values that start moving into the potentially "concerning" area of 4+. The Bussiness_flag is definitely one of these that passes that threshold. The transit and retail flags are close to it.
+
+```{r}
+vif(model_three)
+```
+
+
+`Homoskedastic Errors:`
+
+To assess whether the distribution of the errors is homoskedastic, we examined the residuals versus fitted plot. From the plot it looks like the points above our line are more spaced out and the ones below are a bit more dense and "heavy". This is much less balanced that our model 2 plot.
+
+ 
+```{r}
+plot(model_three, which=3)
+```
+
+`Normally Distributed Errors:`
+
+```{r}
+plot_one <- vacc_covid_final_03_31 %>% 
+  ggplot(aes(x = model_resids_3)) + 
+  geom_histogram()
+  
+plot_two <- vacc_covid_final_03_31 %>% 
+  ggplot(aes(sample = model_resids_3)) + 
+  stat_qq() + stat_qq_line()
+
+plot_one / plot_two
+```
+
+## Regression Table
+
+To display our models in a regression table, we will use the stargazer function from the stargazer package.
+
+First, we need to create vectors of robust standard errors for each model and then pass the standard errors into stargazer through the se argument.
+
+% of population vaccinated is statistically significant in Model two and Model three however the coefficient slightly increases from Model One to Two to Three which implies that the variable is showing more effect on increasing new Covid cases.
+The adjusted R2 is highest in Model two which is also suggests it is has the most variance
+
+```{r warning=FALSE}
+se.model_one_log_linear = coeftest(model_one_log_linear, vcov = vcovHC)[ , "Std. Error"]
+se.model_two = coeftest(model_two, vcov = vcovHC)[ , "Std. Error"]
+semodel_three = coeftest(model_three, vcov = vcovHC)[ , "Std. Error"]
+
+
+stargazer(model_one_log_linear, model_two, model_three, type = "text", omit.stat = "f",
+          se = list(semodel_three),
+          star.cutoffs = c(0.05, 0.01, 0.001), title = "Table 1: The relationship between new covid cases and $ of population vaccinated")
+
+```
+
